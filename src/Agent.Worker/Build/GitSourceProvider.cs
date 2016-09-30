@@ -168,6 +168,13 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
                 checkoutSubmodules = StringUtil.ConvertToBoolean(endpoint.Data[WellKnownEndpointData.CheckoutSubmodules]);
             }
 
+            int fetchDepth = 0;
+            if (endpoint.Data.ContainsKey("fetchDepth") &&
+                (!int.TryParse(endpoint.Data["fetchDepth"], out fetchDepth) || fetchDepth < 0))
+            {
+                fetchDepth = 0;
+            }
+
             bool exposeCred = executionContext.Variables.GetBoolean(Constants.Variables.System.EnableAccessToken) ?? false;
 
             Trace.Info($"Repository url={repositoryUrl}");
@@ -177,6 +184,10 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             Trace.Info($"clean={clean}");
             Trace.Info($"checkoutSubmodules={checkoutSubmodules}");
             Trace.Info($"exposeCred={exposeCred}");
+            if (fetchDepth > 0)
+            {
+                Trace.Info($"fetchDepth={fetchDepth}");
+            }
 
             // Determine which git will be use
             // On windows, we prefer the built-in portable git within the agent's externals folder, set system.prefergitfrompath=true can change the behavior, 
@@ -419,9 +430,14 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
 
             // If this is a build for a pull request, then include
             // the pull request reference as an additional ref.
-            string fetchSpec = IsPullRequest(sourceBranch) ? StringUtil.Format("+{0}:{1}", sourceBranch, GetRemoteRefName(sourceBranch)) : null;
+            List<string> additionalFetchSpecs = new List<string>();
+            if (IsPullRequest(sourceBranch))
+            {
+                additionalFetchSpecs.Add("+refs/heads/*:refs/remotes/origin/*");
+                additionalFetchSpecs.Add(StringUtil.Format("+{0}:{1}", sourceBranch, GetRemoteRefName(sourceBranch)));
+            }
 
-            int exitCode_fetch = await _gitCommandManager.GitFetch(executionContext, targetPath, "origin", new List<string>() { fetchSpec }, string.Join(" ", additionalFetchArgs), cancellationToken);
+            int exitCode_fetch = await _gitCommandManager.GitFetch(executionContext, targetPath, "origin", fetchDepth, additionalFetchSpecs, string.Join(" ", additionalFetchArgs), cancellationToken);
             if (exitCode_fetch != 0)
             {
                 throw new InvalidOperationException($"Git fetch failed with exit code: {exitCode_fetch}");
@@ -448,6 +464,13 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             int exitCode_checkout = await _gitCommandManager.GitCheckout(executionContext, targetPath, sourcesToBuild, cancellationToken);
             if (exitCode_checkout != 0)
             {
+                // local repository is shallow repository, checkout may fail due to lack of commits history.
+                // this will happen when the checkout commit is older than tip -> fetchDepth
+                if (fetchDepth > 0)
+                {
+                    executionContext.Warning(StringUtil.Loc("ShallowCheckoutFail", fetchDepth));
+                }
+
                 throw new InvalidOperationException($"Git checkout failed with exit code: {exitCode_checkout}");
             }
 
